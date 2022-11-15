@@ -248,6 +248,8 @@ def main():
     else:
         input_ids = encoded_prompt
 
+    print("input ids shape: ", input_ids) 
+
     output_sequences = model.generate(
         input_ids=input_ids,
         max_length=args.length + len(encoded_prompt[0]),

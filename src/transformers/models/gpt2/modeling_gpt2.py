@@ -19,6 +19,7 @@ import math
 import os
 from dataclasses import dataclass
 from typing import Optional, Tuple, Union
+import time
 
 import torch
 import torch.utils.checkpoint
@@ -124,7 +125,7 @@ class GPT2Attention(nn.Module):
     def __init__(self, config, is_cross_attention=False, layer_idx=None):
         super().__init__()
 
-        max_positions = config.max_position_embeddings
+        max_positions = 4100 # increase from 1024 for profiling - "config.max_position_embeddings"
         self.register_buffer(
             "bias",
             torch.tril(torch.ones((max_positions, max_positions), dtype=torch.uint8)).view(
@@ -162,6 +163,10 @@ class GPT2Attention(nn.Module):
         self.resid_dropout = nn.Dropout(config.resid_pdrop)
 
         self.pruned_heads = set()
+
+        # TIMING INFO
+        self.attn_fc_time = 0
+        self.attn_other_time = 0
 
     def prune_heads(self, heads):
         if len(heads) == 0:
@@ -297,6 +302,8 @@ class GPT2Attention(nn.Module):
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
     ) -> Tuple[Union[torch.Tensor, Tuple[torch.Tensor]], ...]:
+
+        fc_time_t1 = time.time()
         if encoder_hidden_states is not None:
             if not hasattr(self, "q_attn"):
                 raise ValueError(
@@ -309,6 +316,7 @@ class GPT2Attention(nn.Module):
             attention_mask = encoder_attention_mask
         else:
             query, key, value = self.c_attn(hidden_states).split(self.split_size, dim=2)
+        fc_time_t2 = time.time()
 
         query = self._split_heads(query, self.num_heads, self.head_dim)
         key = self._split_heads(key, self.num_heads, self.head_dim)
@@ -324,14 +332,21 @@ class GPT2Attention(nn.Module):
         else:
             present = None
 
+        other_time_t1 = time.time()
         if self.reorder_and_upcast_attn:
             attn_output, attn_weights = self._upcast_and_reordered_attn(query, key, value, attention_mask, head_mask)
         else:
             attn_output, attn_weights = self._attn(query, key, value, attention_mask, head_mask)
+        other_time_t2 = time.time()
 
         attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
+        fc_time_t3 = time.time()
         attn_output = self.c_proj(attn_output)
+        fc_time_t4 = time.time()
         attn_output = self.resid_dropout(attn_output)
+
+        self.attn_fc_time = fc_time_t4 - fc_time_t3 + fc_time_t2 - fc_time_t1
+        self.attn_other_time = other_time_t2 - other_time_t1 
 
         outputs = (attn_output, present)
         if output_attentions:
@@ -348,12 +363,23 @@ class GPT2MLP(nn.Module):
         self.c_proj = Conv1D(embed_dim, intermediate_size)
         self.act = ACT2FN[config.activation_function]
         self.dropout = nn.Dropout(config.resid_pdrop)
+        
+        self.ffn_other_time = 0
+        self.ffn_fc_time = 0
 
     def forward(self, hidden_states: Optional[Tuple[torch.FloatTensor]]) -> torch.FloatTensor:
+        fc_time_t1 = time.time()
         hidden_states = self.c_fc(hidden_states)
+        fc_time_t2 = time.time()
+        other_time_t1 = time.time()
         hidden_states = self.act(hidden_states)
+        other_time_t2 = time.time()
+        fc_time_t3 = time.time()
         hidden_states = self.c_proj(hidden_states)
+        fc_time_t4 = time.time()
         hidden_states = self.dropout(hidden_states)
+        self.ffn_fc_time = fc_time_t4 - fc_time_t3 + fc_time_t2 - fc_time_t1
+        self.ffn_other_time = other_time_t2 - other_time_t1 
         return hidden_states
 
 
@@ -373,6 +399,12 @@ class GPT2Block(nn.Module):
 
         self.mlp = GPT2MLP(inner_dim, config)
 
+        self.total_time = 0
+        self.ffn_other_time = 0
+        self.ffn_fc_time = 0
+        self.attn_other_time = 0
+        self.attn_fc_time = 0
+
     def forward(
         self,
         hidden_states: Optional[Tuple[torch.FloatTensor]],
@@ -384,8 +416,15 @@ class GPT2Block(nn.Module):
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
     ) -> Union[Tuple[torch.Tensor], Optional[Tuple[torch.Tensor, Tuple[torch.FloatTensor, ...]]]]:
+        
+        total_time_t1 = time.time()
+
         residual = hidden_states
+
+        ln_time_t1 = time.time()
         hidden_states = self.ln_1(hidden_states)
+        ln_time_t2 = time.time()
+
         attn_outputs = self.attn(
             hidden_states,
             layer_past=layer_past,
@@ -397,7 +436,9 @@ class GPT2Block(nn.Module):
         attn_output = attn_outputs[0]  # output_attn: a, present, (attentions)
         outputs = attn_outputs[1:]
         # residual connection
+        res_time_t1 = time.time()
         hidden_states = attn_output + residual
+        res_time_t2 = time.time()
 
         if encoder_hidden_states is not None:
             # add one self-attention block for cross-attention
@@ -422,15 +463,29 @@ class GPT2Block(nn.Module):
             outputs = outputs + cross_attn_outputs[2:]  # add cross attentions if we output attention weights
 
         residual = hidden_states
+        ln_time_t3 = time.time()
         hidden_states = self.ln_2(hidden_states)
+        ln_time_t4 = time.time()
         feed_forward_hidden_states = self.mlp(hidden_states)
         # residual connection
+        res_time_t3 = time.time()
         hidden_states = residual + feed_forward_hidden_states
+        res_time_t4 = time.time()
 
         if use_cache:
             outputs = (hidden_states,) + outputs
         else:
             outputs = (hidden_states,) + outputs[1:]
+
+        total_time_t2 = time.time()
+        self.total_time = total_time_t2 - total_time_t1
+
+        self.attn_fc_time = self.attn.attn_fc_time
+        self.attn_other_time = self.attn.attn_other_time
+        self.ffn_fc_time = self.mlp.ffn_fc_time
+        restime = res_time_t4 - res_time_t3 + res_time_t2 - res_time_t1
+        lntime = ln_time_t4 - ln_time_t3 + ln_time_t2 - ln_time_t1
+        self.ffn_other_time = self.mlp.ffn_other_time + lntime + restime
 
         return outputs  # hidden_states, present, (attentions, cross_attentions)
 
@@ -687,6 +742,13 @@ class GPT2Model(GPT2PreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
+        self.total_time = 0
+        self.attn_other_time = 0
+        self.attn_fc_time = 0
+        self.ffn_other_time = 0
+        self.ffn_fc_time = 0
+        self.N = 0
+
     @add_start_docstrings(PARALLELIZE_DOCSTRING)
     def parallelize(self, device_map=None):
         # Check validity of device_map
@@ -830,13 +892,16 @@ class GPT2Model(GPT2PreTrainedModel):
 
         if inputs_embeds is None:
             inputs_embeds = self.wte(input_ids)
-        position_embeds = self.wpe(position_ids)
-        hidden_states = inputs_embeds + position_embeds
+#        position_embeds = self.wpe(position_ids)
+#        hidden_states = inputs_embeds + position_embeds
+        # need to skip embedding stage to avoid issues with maximum positional embedding size 
+        hidden_states = inputs_embeds
+        #print(hidden_states.shape)
 
         if token_type_ids is not None:
             token_type_embeds = self.wte(token_type_ids)
             hidden_states = hidden_states + token_type_embeds
-
+ 
         hidden_states = self.drop(hidden_states)
 
         output_shape = input_shape + (hidden_states.size(-1),)
@@ -897,6 +962,12 @@ class GPT2Model(GPT2PreTrainedModel):
                     output_attentions=output_attentions,
                 )
 
+            self.total_time += block.total_time
+            self.attn_fc_time += block.attn_fc_time
+            self.attn_other_time += block.attn_other_time
+            self.ffn_fc_time += block.ffn_fc_time
+            self.ffn_other_time += block.ffn_other_time
+
             hidden_states = outputs[0]
             if use_cache is True:
                 presents = presents + (outputs[1],)
@@ -925,6 +996,17 @@ class GPT2Model(GPT2PreTrainedModel):
                 for v in [hidden_states, presents, all_hidden_states, all_self_attentions, all_cross_attentions]
                 if v is not None
             )
+
+        self.N += 1
+        if ((self.N) % (10*128) == 0):
+            print("USING GPT2 DECODER")
+            print("N: ", self.N)
+            print("SHAPE: ", hidden_states.shape)
+            print("self.total_time", self.total_time)
+            print("self.attn_fc_time", self.attn_fc_time)
+            print("self.attn_other_time", self.attn_other_time)
+            print("self.ffn_fc_time", self.ffn_fc_time)
+            print("self.ffn_other_time", self.ffn_other_time)
 
         return BaseModelOutputWithPastAndCrossAttentions(
             last_hidden_state=hidden_states,
@@ -1058,7 +1140,12 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-        hidden_states = transformer_outputs[0]
+        #hidden_states = transformer_outputs[0]
+
+        hidden_states = torch.ones((1,1,768))
+
+        #print("hidden type: ", hidden_states)
+        #print("hidden shape: ", hidden_states.shape)
 
         # Set device for model parallelism
         if self.model_parallel:

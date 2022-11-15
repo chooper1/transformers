@@ -21,6 +21,7 @@ import os
 import warnings
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
+import time
 
 import torch
 import torch.utils.checkpoint
@@ -267,6 +268,9 @@ class BertSelfAttention(nn.Module):
 
         self.is_decoder = config.is_decoder
 
+        self.fc_time = 0
+        self.other_time = 0
+
     def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
         x = x.view(new_x_shape)
@@ -289,6 +293,7 @@ class BertSelfAttention(nn.Module):
         # such that the encoder's padding tokens are not attended to.
         is_cross_attention = encoder_hidden_states is not None
 
+        fc_time_t1 = time.time() 
         if is_cross_attention and past_key_value is not None:
             # reuse k,v, cross_attentions
             key_layer = past_key_value[0]
@@ -308,6 +313,8 @@ class BertSelfAttention(nn.Module):
             value_layer = self.transpose_for_scores(self.value(hidden_states))
 
         query_layer = self.transpose_for_scores(mixed_query_layer)
+        fc_time_t2 = time.time()
+        self.fc_time = fc_time_t2 - fc_time_t1
 
         if self.is_decoder:
             # if cross_attention save Tuple(torch.Tensor, torch.Tensor) of all cross attention key/value_states.
@@ -319,6 +326,7 @@ class BertSelfAttention(nn.Module):
             # if encoder bi-directional self-attention `past_key_value` is always `None`
             past_key_value = (key_layer, value_layer)
 
+        other_time_t1 = time.time()
         # Take the dot product between "query" and "key" to get the raw attention scores.
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
 
@@ -355,6 +363,9 @@ class BertSelfAttention(nn.Module):
             attention_probs = attention_probs * head_mask
 
         context_layer = torch.matmul(attention_probs, value_layer)
+       
+        other_time_t2 = time.time()
+        self.other_time = other_time_t2 - other_time_t1
 
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
@@ -373,11 +384,20 @@ class BertSelfOutput(nn.Module):
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.fc_time = 0
+        self.other_time = 0
 
     def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
+        fc_time_t1 = time.time()
         hidden_states = self.dense(hidden_states)
+        fc_time_t2 = time.time()
+        self.fc_time = fc_time_t2 - fc_time_t1
         hidden_states = self.dropout(hidden_states)
+        
+        other_time_t1 = time.time()
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        other_time_t2 = time.time()
+        self.other_time = other_time_t2 - other_time_t1
         return hidden_states
 
 
@@ -387,6 +407,9 @@ class BertAttention(nn.Module):
         self.self = BertSelfAttention(config, position_embedding_type=position_embedding_type)
         self.output = BertSelfOutput(config)
         self.pruned_heads = set()
+
+        self.fc_time = 0
+        self.other_time = 0
 
     def prune_heads(self, heads):
         if len(heads) == 0:
@@ -427,6 +450,8 @@ class BertAttention(nn.Module):
         )
         attention_output = self.output(self_outputs[0], hidden_states)
         outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
+        self.other_time = self.output.other_time + self.self.other_time
+        self.fc_time = self.output.fc_time + self.self.fc_time
         return outputs
 
 
@@ -438,10 +463,19 @@ class BertIntermediate(nn.Module):
             self.intermediate_act_fn = ACT2FN[config.hidden_act]
         else:
             self.intermediate_act_fn = config.hidden_act
+        self.fc_time = 0
+        self.other_time = 0 
+ 
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        fc_time_t1 = time.time()
         hidden_states = self.dense(hidden_states)
+        fc_time_t2 = time.time()
+        other_time_t1 = time.time()
         hidden_states = self.intermediate_act_fn(hidden_states)
+        other_time_t2 = time.time()
+        self.fc_time = fc_time_t2 - fc_time_t1
+        self.other_time = other_time_t2 - other_time_t1
         return hidden_states
 
 
@@ -451,11 +485,19 @@ class BertOutput(nn.Module):
         self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.fc_time = 0
+        self.other_time = 0 
 
     def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
+        fc_time_t1 = time.time()
         hidden_states = self.dense(hidden_states)
+        fc_time_t2 = time.time()
         hidden_states = self.dropout(hidden_states)
+        other_time_t1 = time.time()
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        other_time_t2 = time.time()
+        self.fc_time = fc_time_t2 - fc_time_t1
+        self.other_time = other_time_t2 - other_time_t1
         return hidden_states
 
 
@@ -474,6 +516,12 @@ class BertLayer(nn.Module):
         self.intermediate = BertIntermediate(config)
         self.output = BertOutput(config)
 
+        self.total_time = 0
+        self.ffn_fc_time = 0
+        self.ffn_other_time = 0
+        self.attn_fc_time = 0
+        self.attn_other_time = 0
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -485,6 +533,7 @@ class BertLayer(nn.Module):
         output_attentions: Optional[bool] = False,
     ) -> Tuple[torch.Tensor]:
         # decoder uni-directional self-attention cached key/values tuple is at positions 1,2
+        total_time_t1 = time.time() 
         self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
         self_attention_outputs = self.attention(
             hidden_states,
@@ -537,13 +586,19 @@ class BertLayer(nn.Module):
         if self.is_decoder:
             outputs = outputs + (present_key_value,)
 
+        self.attn_fc_time = self.attention.fc_time
+        self.attn_other_time = self.attention.other_time
+
+        total_time_t2 = time.time()
+        self.total_time = total_time_t2 - total_time_t1  
         return outputs
 
     def feed_forward_chunk(self, attention_output):
         intermediate_output = self.intermediate(attention_output)
         layer_output = self.output(intermediate_output, attention_output)
+        self.ffn_fc_time = self.intermediate.fc_time + self.output.fc_time
+        self.ffn_other_time = self.intermediate.other_time + self.output.other_time
         return layer_output
-
 
 class BertEncoder(nn.Module):
     def __init__(self, config):
@@ -551,6 +606,13 @@ class BertEncoder(nn.Module):
         self.config = config
         self.layer = nn.ModuleList([BertLayer(config) for _ in range(config.num_hidden_layers)])
         self.gradient_checkpointing = False
+
+        self.total_time = 0
+        self.attn_other_time = 0
+        self.attn_fc_time = 0
+        self.ffn_other_time = 0
+        self.ffn_fc_time = 0
+        self.N = 0
 
     def forward(
         self,
@@ -570,6 +632,8 @@ class BertEncoder(nn.Module):
         all_cross_attentions = () if output_attentions and self.config.add_cross_attention else None
 
         next_decoder_cache = () if use_cache else None
+
+
         for i, layer_module in enumerate(self.layer):
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
@@ -591,6 +655,7 @@ class BertEncoder(nn.Module):
 
                     return custom_forward
 
+
                 layer_outputs = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(layer_module),
                     hidden_states,
@@ -600,6 +665,7 @@ class BertEncoder(nn.Module):
                     encoder_attention_mask,
                 )
             else:
+                
                 layer_outputs = layer_module(
                     hidden_states,
                     attention_mask,
@@ -609,6 +675,11 @@ class BertEncoder(nn.Module):
                     past_key_value,
                     output_attentions,
                 )
+                self.total_time += layer_module.total_time
+                self.attn_fc_time += layer_module.attn_fc_time
+                self.attn_other_time += layer_module.attn_other_time
+                self.ffn_fc_time += layer_module.ffn_fc_time
+                self.ffn_other_time += layer_module.ffn_other_time
 
             hidden_states = layer_outputs[0]
             if use_cache:
@@ -633,6 +704,16 @@ class BertEncoder(nn.Module):
                 ]
                 if v is not None
             )
+        #print("BERT BASE RUNNING COUNTERS")
+        self.N += 1
+        if (self.N % 100 == 0):
+            print("USING BERT ENCODER")        
+            print("SHAPE: ", hidden_states.shape)
+            print("self.total_time", self.total_time)
+            print("self.attn_fc_time", self.attn_fc_time)
+            print("self.attn_other_time", self.attn_other_time)
+            print("self.ffn_fc_time", self.ffn_fc_time)
+            print("self.ffn_other_time", self.ffn_other_time)
         return BaseModelOutputWithPastAndCrossAttentions(
             last_hidden_state=hidden_states,
             past_key_values=next_decoder_cache,
