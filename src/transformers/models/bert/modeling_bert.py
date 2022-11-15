@@ -531,10 +531,33 @@ class BertLayer(nn.Module):
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         past_key_value: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
         output_attentions: Optional[bool] = False,
+        gpu_profile: Optional[bool] = False,
+        num_iters: Optional[int] = 1,
     ) -> Tuple[torch.Tensor]:
         # decoder uni-directional self-attention cached key/values tuple is at positions 1,2
         total_time_t1 = time.time() 
         self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
+
+        # uncomment for GPU profiling
+        if gpu_profile:
+            print("ATTENTION:")
+            with torch.profiler.profile( 
+                activities=[ 
+                    torch.profiler.ProfilerActivity.CPU, 
+                    torch.profiler.ProfilerActivity.CUDA, 
+                ] 
+            ) as p: 
+                for i in range(0,num_iters):
+                    profile = self.attention(
+                        hidden_states,
+                        attention_mask,
+                        head_mask,
+                        output_attentions=output_attentions,
+                        past_key_value=self_attn_past_key_value,
+                    )
+                    del profile
+            print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
+
         self_attention_outputs = self.attention(
             hidden_states,
             attention_mask,
@@ -577,6 +600,20 @@ class BertLayer(nn.Module):
             cross_attn_present_key_value = cross_attention_outputs[-1]
             present_key_value = present_key_value + cross_attn_present_key_value
 
+        if gpu_profile:
+            print("FFN:")
+            with torch.profiler.profile( 
+                activities=[ 
+                    torch.profiler.ProfilerActivity.CPU, 
+                    torch.profiler.ProfilerActivity.CUDA, 
+                ] 
+            ) as p: 
+                for i in range(0,num_iters):
+                    profile = apply_chunking_to_forward(
+                        self.feed_forward_chunk, self.chunk_size_feed_forward, self.seq_len_dim, attention_output
+                    )
+                    del profile
+            print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
         layer_output = apply_chunking_to_forward(
             self.feed_forward_chunk, self.chunk_size_feed_forward, self.seq_len_dim, attention_output
         )
@@ -626,6 +663,8 @@ class BertEncoder(nn.Module):
         output_attentions: Optional[bool] = False,
         output_hidden_states: Optional[bool] = False,
         return_dict: Optional[bool] = True,
+        gpu_profile: Optional[bool] = False,
+        num_iters: Optional[int] = 1,
     ) -> Union[Tuple[torch.Tensor], BaseModelOutputWithPastAndCrossAttentions]:
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
@@ -665,16 +704,19 @@ class BertEncoder(nn.Module):
                     encoder_attention_mask,
                 )
             else:
-                
-                layer_outputs = layer_module(
-                    hidden_states,
-                    attention_mask,
-                    layer_head_mask,
-                    encoder_hidden_states,
-                    encoder_attention_mask,
-                    past_key_value,
-                    output_attentions,
-                )
+
+                if i == 0 or not gpu_profile:                
+                    layer_outputs = layer_module(
+                        hidden_states,
+                        attention_mask,
+                        layer_head_mask,
+                        encoder_hidden_states,
+                        encoder_attention_mask,
+                        past_key_value,
+                        output_attentions,
+                        gpu_profile,
+                        num_iters, 
+                    )
                 self.total_time += layer_module.total_time
                 self.attn_fc_time += layer_module.attn_fc_time
                 self.attn_other_time += layer_module.attn_other_time
