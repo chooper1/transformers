@@ -269,6 +269,7 @@ class BertSelfAttention(nn.Module):
         self.is_decoder = config.is_decoder
 
         self.fc_time = 0
+        self.matmul_time = 0
         self.other_time = 0
 
     def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
@@ -293,7 +294,7 @@ class BertSelfAttention(nn.Module):
         # such that the encoder's padding tokens are not attended to.
         is_cross_attention = encoder_hidden_states is not None
 
-        fc_time_t1 = time.time() 
+        fc_time_t1 = time.time()
         if is_cross_attention and past_key_value is not None:
             # reuse k,v, cross_attentions
             key_layer = past_key_value[0]
@@ -326,7 +327,7 @@ class BertSelfAttention(nn.Module):
             # if encoder bi-directional self-attention `past_key_value` is always `None`
             past_key_value = (key_layer, value_layer)
 
-        other_time_t1 = time.time()
+        matmul_time_t1 = time.time()
         # Take the dot product between "query" and "key" to get the raw attention scores.
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
 
@@ -350,7 +351,9 @@ class BertSelfAttention(nn.Module):
         if attention_mask is not None:
             # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
             attention_scores = attention_scores + attention_mask
+        matmul_time_t2 = time.time()
 
+        other_time_t1 = time.time()
         # Normalize the attention scores to probabilities.
         attention_probs = nn.functional.softmax(attention_scores, dim=-1)
 
@@ -362,9 +365,15 @@ class BertSelfAttention(nn.Module):
         if head_mask is not None:
             attention_probs = attention_probs * head_mask
 
-        context_layer = torch.matmul(attention_probs, value_layer)
-       
         other_time_t2 = time.time()
+
+        matmul_time_t3 = time.time()
+
+        context_layer = torch.matmul(attention_probs, value_layer)
+
+        matmul_time_t4 = time.time()
+
+        self.matmul_time = (matmul_time_t4 - matmul_time_t3) + (matmul_time_t2 - matmul_time_t1)
         self.other_time = other_time_t2 - other_time_t1
 
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
@@ -393,7 +402,7 @@ class BertSelfOutput(nn.Module):
         fc_time_t2 = time.time()
         self.fc_time = fc_time_t2 - fc_time_t1
         hidden_states = self.dropout(hidden_states)
-        
+
         other_time_t1 = time.time()
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
         other_time_t2 = time.time()
@@ -409,6 +418,7 @@ class BertAttention(nn.Module):
         self.pruned_heads = set()
 
         self.fc_time = 0
+        self.matmul_time = 0
         self.other_time = 0
 
     def prune_heads(self, heads):
@@ -451,6 +461,7 @@ class BertAttention(nn.Module):
         attention_output = self.output(self_outputs[0], hidden_states)
         outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
         self.other_time = self.output.other_time + self.self.other_time
+        self.matmul_time = self.self.matmul_time
         self.fc_time = self.output.fc_time + self.self.fc_time
         return outputs
 
@@ -464,8 +475,8 @@ class BertIntermediate(nn.Module):
         else:
             self.intermediate_act_fn = config.hidden_act
         self.fc_time = 0
-        self.other_time = 0 
- 
+        self.other_time = 0
+
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         fc_time_t1 = time.time()
@@ -486,7 +497,7 @@ class BertOutput(nn.Module):
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.fc_time = 0
-        self.other_time = 0 
+        self.other_time = 0
 
     def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
         fc_time_t1 = time.time()
@@ -520,6 +531,7 @@ class BertLayer(nn.Module):
         self.ffn_fc_time = 0
         self.ffn_other_time = 0
         self.attn_fc_time = 0
+        self.attn_matmul_time = 0
         self.attn_other_time = 0
 
     def forward(
@@ -535,18 +547,18 @@ class BertLayer(nn.Module):
         num_iters: Optional[int] = 1,
     ) -> Tuple[torch.Tensor]:
         # decoder uni-directional self-attention cached key/values tuple is at positions 1,2
-        total_time_t1 = time.time() 
+        total_time_t1 = time.time()
         self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
 
         # uncomment for GPU profiling
         if gpu_profile:
             print("ATTENTION:")
-            with torch.profiler.profile( 
-                activities=[ 
-                    torch.profiler.ProfilerActivity.CPU, 
-                    torch.profiler.ProfilerActivity.CUDA, 
-                ] 
-            ) as p: 
+            with torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ]
+            ) as p:
                 for i in range(0,num_iters):
                     profile = self.attention(
                         hidden_states,
@@ -602,12 +614,12 @@ class BertLayer(nn.Module):
 
         if gpu_profile:
             print("FFN:")
-            with torch.profiler.profile( 
-                activities=[ 
-                    torch.profiler.ProfilerActivity.CPU, 
-                    torch.profiler.ProfilerActivity.CUDA, 
-                ] 
-            ) as p: 
+            with torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ]
+            ) as p:
                 for i in range(0,num_iters):
                     profile = apply_chunking_to_forward(
                         self.feed_forward_chunk, self.chunk_size_feed_forward, self.seq_len_dim, attention_output
@@ -624,10 +636,11 @@ class BertLayer(nn.Module):
             outputs = outputs + (present_key_value,)
 
         self.attn_fc_time = self.attention.fc_time
+        self.attn_matmul_time = self.attention.matmul_time
         self.attn_other_time = self.attention.other_time
 
         total_time_t2 = time.time()
-        self.total_time = total_time_t2 - total_time_t1  
+        self.total_time = total_time_t2 - total_time_t1
         return outputs
 
     def feed_forward_chunk(self, attention_output):
@@ -647,6 +660,7 @@ class BertEncoder(nn.Module):
         self.total_time = 0
         self.attn_other_time = 0
         self.attn_fc_time = 0
+        self.attn_matmul_time = 0
         self.ffn_other_time = 0
         self.ffn_fc_time = 0
         self.N = 0
@@ -705,7 +719,7 @@ class BertEncoder(nn.Module):
                 )
             else:
 
-                if i == 0 or not gpu_profile:                
+                if i == 0 or not gpu_profile:
                     layer_outputs = layer_module(
                         hidden_states,
                         attention_mask,
@@ -715,11 +729,12 @@ class BertEncoder(nn.Module):
                         past_key_value,
                         output_attentions,
                         gpu_profile,
-                        num_iters, 
+                        num_iters,
                     )
                 self.total_time += layer_module.total_time
                 self.attn_fc_time += layer_module.attn_fc_time
                 self.attn_other_time += layer_module.attn_other_time
+                self.attn_matmul_time += layer_module.attn_matmul_time
                 self.ffn_fc_time += layer_module.ffn_fc_time
                 self.ffn_other_time += layer_module.ffn_other_time
 
@@ -749,10 +764,11 @@ class BertEncoder(nn.Module):
         #print("BERT BASE RUNNING COUNTERS")
         self.N += 1
         if (self.N % 100 == 0):
-            print("USING BERT ENCODER")        
+            print("PROFILING BERT ENCODER")
             print("SHAPE: ", hidden_states.shape)
             print("self.total_time", self.total_time)
             print("self.attn_fc_time", self.attn_fc_time)
+            print("self.attn_matmul_time", self.attn_matmul_time)
             print("self.attn_other_time", self.attn_other_time)
             print("self.ffn_fc_time", self.ffn_fc_time)
             print("self.ffn_other_time", self.ffn_other_time)
