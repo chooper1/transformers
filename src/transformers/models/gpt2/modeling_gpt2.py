@@ -167,6 +167,7 @@ class GPT2Attention(nn.Module):
         # TIMING INFO
         self.attn_fc_time = 0
         self.attn_other_time = 0
+        self.attn_matmul_time = 0
 
     def prune_heads(self, heads):
         if len(heads) == 0:
@@ -184,12 +185,17 @@ class GPT2Attention(nn.Module):
         self.pruned_heads = self.pruned_heads.union(heads)
 
     def _attn(self, query, key, value, attention_mask=None, head_mask=None):
+
+        matmul_time_t1 = time.time()
         attn_weights = torch.matmul(query, key.transpose(-1, -2))
 
         if self.scale_attn_weights:
             attn_weights = attn_weights / torch.full(
                 [], value.size(-1) ** 0.5, dtype=attn_weights.dtype, device=attn_weights.device
             )
+
+        matmul_time_t2 = time.time()
+        other_time_t1 = time.time()
 
         # Layer-wise attention scaling
         if self.scale_attn_by_inverse_layer_idx:
@@ -219,7 +225,14 @@ class GPT2Attention(nn.Module):
         if head_mask is not None:
             attn_weights = attn_weights * head_mask
 
+        other_time_t2 = time.time()
+
+        matmul_time_t3 = time.time()
         attn_output = torch.matmul(attn_weights, value)
+        matmul_time_t4 = time.time()
+
+        self.attn_matmul_time = (matmul_time_t4 - matmul_time_t3) + (matmul_time_t2 - matmul_time_t1)
+        self.attn_other_time = other_time_t2 - other_time_t1
 
         return attn_output, attn_weights
 
@@ -332,12 +345,12 @@ class GPT2Attention(nn.Module):
         else:
             present = None
 
-        other_time_t1 = time.time()
+        # other_time_t1 = time.time()
         if self.reorder_and_upcast_attn:
             attn_output, attn_weights = self._upcast_and_reordered_attn(query, key, value, attention_mask, head_mask)
         else:
             attn_output, attn_weights = self._attn(query, key, value, attention_mask, head_mask)
-        other_time_t2 = time.time()
+        # other_time_t2 = time.time()
 
         attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
         fc_time_t3 = time.time()
@@ -346,7 +359,7 @@ class GPT2Attention(nn.Module):
         attn_output = self.resid_dropout(attn_output)
 
         self.attn_fc_time = fc_time_t4 - fc_time_t3 + fc_time_t2 - fc_time_t1
-        self.attn_other_time = other_time_t2 - other_time_t1 
+        # self.attn_other_time = other_time_t2 - other_time_t1
 
         outputs = (attn_output, present)
         if output_attentions:
@@ -363,7 +376,7 @@ class GPT2MLP(nn.Module):
         self.c_proj = Conv1D(embed_dim, intermediate_size)
         self.act = ACT2FN[config.activation_function]
         self.dropout = nn.Dropout(config.resid_pdrop)
-        
+
         self.ffn_other_time = 0
         self.ffn_fc_time = 0
 
@@ -379,7 +392,7 @@ class GPT2MLP(nn.Module):
         fc_time_t4 = time.time()
         hidden_states = self.dropout(hidden_states)
         self.ffn_fc_time = fc_time_t4 - fc_time_t3 + fc_time_t2 - fc_time_t1
-        self.ffn_other_time = other_time_t2 - other_time_t1 
+        self.ffn_other_time = other_time_t2 - other_time_t1
         return hidden_states
 
 
@@ -402,6 +415,7 @@ class GPT2Block(nn.Module):
         self.total_time = 0
         self.ffn_other_time = 0
         self.ffn_fc_time = 0
+        self.attn_matmul_time = 0
         self.attn_other_time = 0
         self.attn_fc_time = 0
 
@@ -416,7 +430,7 @@ class GPT2Block(nn.Module):
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
     ) -> Union[Tuple[torch.Tensor], Optional[Tuple[torch.Tensor, Tuple[torch.FloatTensor, ...]]]]:
-        
+
         total_time_t1 = time.time()
 
         residual = hidden_states
@@ -466,6 +480,7 @@ class GPT2Block(nn.Module):
         ln_time_t3 = time.time()
         hidden_states = self.ln_2(hidden_states)
         ln_time_t4 = time.time()
+
         feed_forward_hidden_states = self.mlp(hidden_states)
         # residual connection
         res_time_t3 = time.time()
@@ -480,12 +495,16 @@ class GPT2Block(nn.Module):
         total_time_t2 = time.time()
         self.total_time = total_time_t2 - total_time_t1
 
+        restime_attn = res_time_t2 - res_time_t1
+        lntime_attn = ln_time_t2 - ln_time_t1
+        restime_ffn = res_time_t4 - res_time_t3
+        lntime_ffn = ln_time_t4 - ln_time_t3
+
         self.attn_fc_time = self.attn.attn_fc_time
-        self.attn_other_time = self.attn.attn_other_time
+        self.attn_matmul_time = self.attn.attn_matmul_time
+        self.attn_other_time = self.attn.attn_other_time + lntime_ffn + restime_ffn
         self.ffn_fc_time = self.mlp.ffn_fc_time
-        restime = res_time_t4 - res_time_t3 + res_time_t2 - res_time_t1
-        lntime = ln_time_t4 - ln_time_t3 + ln_time_t2 - ln_time_t1
-        self.ffn_other_time = self.mlp.ffn_other_time + lntime + restime
+        self.ffn_other_time = self.mlp.ffn_other_time + lntime_ffn + restime_ffn
 
         return outputs  # hidden_states, present, (attentions, cross_attentions)
 
@@ -744,6 +763,7 @@ class GPT2Model(GPT2PreTrainedModel):
 
         self.total_time = 0
         self.attn_other_time = 0
+        self.attn_matmul_time = 0
         self.attn_fc_time = 0
         self.ffn_other_time = 0
         self.ffn_fc_time = 0
@@ -894,14 +914,14 @@ class GPT2Model(GPT2PreTrainedModel):
             inputs_embeds = self.wte(input_ids)
 #        position_embeds = self.wpe(position_ids)
 #        hidden_states = inputs_embeds + position_embeds
-        # need to skip embedding stage to avoid issues with maximum positional embedding size 
+        # need to skip embedding stage to avoid issues with maximum positional embedding size
         hidden_states = inputs_embeds
         #print(hidden_states.shape)
 
         if token_type_ids is not None:
             token_type_embeds = self.wte(token_type_ids)
             hidden_states = hidden_states + token_type_embeds
- 
+
         hidden_states = self.drop(hidden_states)
 
         output_shape = input_shape + (hidden_states.size(-1),)
@@ -964,6 +984,7 @@ class GPT2Model(GPT2PreTrainedModel):
 
             self.total_time += block.total_time
             self.attn_fc_time += block.attn_fc_time
+            self.attn_matmul_time += block.attn_matmul_time
             self.attn_other_time += block.attn_other_time
             self.ffn_fc_time += block.ffn_fc_time
             self.ffn_other_time += block.ffn_other_time
@@ -1004,6 +1025,7 @@ class GPT2Model(GPT2PreTrainedModel):
             print("SHAPE: ", hidden_states.shape)
             print("self.total_time", self.total_time)
             print("self.attn_fc_time", self.attn_fc_time)
+            print("self.attn_matmul_time", self.attn_matmul_time)
             print("self.attn_other_time", self.attn_other_time)
             print("self.ffn_fc_time", self.ffn_fc_time)
             print("self.ffn_other_time", self.ffn_other_time)
