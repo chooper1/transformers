@@ -354,8 +354,6 @@ class GPT2Attention(nn.Module):
 
         attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
 
-        print(attn_output.shape)
-
         fc_time_t3 = time.time()
         attn_output = self.c_proj(attn_output)
         fc_time_t4 = time.time()
@@ -365,6 +363,7 @@ class GPT2Attention(nn.Module):
         # self.attn_other_time = other_time_t2 - other_time_t1
 
         outputs = (attn_output, present)
+        print(outputs.shape)
         if output_attentions:
             outputs += (attn_weights,)
 
