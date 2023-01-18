@@ -345,8 +345,6 @@ class GPT2Attention(nn.Module):
         else:
             present = None
 
-        print(query.shape)
-
         # other_time_t1 = time.time()
         if self.reorder_and_upcast_attn:
             attn_output, attn_weights = self._upcast_and_reordered_attn(query, key, value, attention_mask, head_mask)
@@ -355,6 +353,9 @@ class GPT2Attention(nn.Module):
         # other_time_t2 = time.time()
 
         attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
+
+        print(attn_output.shape)
+
         fc_time_t3 = time.time()
         attn_output = self.c_proj(attn_output)
         fc_time_t4 = time.time()
