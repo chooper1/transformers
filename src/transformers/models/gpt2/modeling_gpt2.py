@@ -217,6 +217,8 @@ class GPT2Attention(nn.Module):
 
         attn_weights = nn.functional.softmax(attn_weights, dim=-1)
 
+        print(attn_weights.shape)
+
         # Downcast (if necessary) back to V's dtype (if in mixed-precision) -- No-Op otherwise
         attn_weights = attn_weights.type(value.dtype)
         attn_weights = self.attn_dropout(attn_weights)
@@ -363,7 +365,7 @@ class GPT2Attention(nn.Module):
         # self.attn_other_time = other_time_t2 - other_time_t1
 
         outputs = (attn_output, present)
-        print(outputs.shape)
+        # print(outputs)
         if output_attentions:
             outputs += (attn_weights,)
 
