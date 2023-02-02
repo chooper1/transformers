@@ -1684,6 +1684,9 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
         logit_time_2 = time.time()
         print('logittime: ', logit_time_2-logit_time_1)
 
+        print('config.d_model: ', config.d_model)
+        print('config.vocab_size: ', config.vocab_size)
+
         loss = None
         if labels is not None:
             loss_fct = CrossEntropyLoss(ignore_index=-100)
