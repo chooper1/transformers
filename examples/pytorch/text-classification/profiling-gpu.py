@@ -45,7 +45,7 @@ def main():
     # run inference with checkpoint on dummy sequence of desired length (do this N times)
     #model.bert.encoder.forward(sequence)
 
-    device = "cuda:6" if torch.cuda.is_available() else "cpu"
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
     #device = "cpu"
     #sequence = torch.ones([seqlen, 768])
     print(model.bert.encoder)

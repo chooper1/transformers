@@ -1151,6 +1151,14 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        print("forward pass")
+
+        print(token_type_ids)
+        print(inputs_embeds)
+
+
+        transformer_time1 = time.time()
+        
         transformer_outputs = self.transformer(
             input_ids,
             past_key_values=past_key_values,
@@ -1167,6 +1175,7 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
             return_dict=return_dict,
         )
         #hidden_states = transformer_outputs[0]
+        transformer_time2 = time.time()
 
         hidden_states = torch.ones((1,1,768))
 
@@ -1178,7 +1187,14 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
             torch.cuda.set_device(self.transformer.first_device)
             hidden_states = hidden_states.to(self.lm_head.weight.device)
 
+        lmhead_time1 = time.time()
         lm_logits = self.lm_head(hidden_states)
+        lmhead_time2 = time.time()
+
+        print("time:")
+        print("transformer: ", transformer_time2-transformer_time1)
+        print("lmhead: ", lmhead_time2-lmhead_time1)
+        print(lm_logits)
 
         loss = None
         if labels is not None:
