@@ -1665,6 +1665,8 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
         dec_time_2 = time.time()
         print('dectime: ', dec_time_2-dec_time_1)
 
+        logit_time_1 = time.time()
+
         sequence_output = decoder_outputs[0]
 
         # Set device for model parallelism
@@ -1678,7 +1680,6 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
             # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
             sequence_output = sequence_output * (self.model_dim**-0.5)
 
-        logit_time_1 = time.time()
         print('sequence_output: ', sequence_output.shape)
         lm_logits = self.lm_head(sequence_output)
         logit_time_2 = time.time()
