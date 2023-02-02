@@ -47,6 +47,7 @@ from ...utils import (
 from ...utils.model_parallel_utils import assert_device_map, get_device_map
 from .configuration_t5 import T5Config
 
+import time
 
 logger = logging.get_logger(__name__)
 
