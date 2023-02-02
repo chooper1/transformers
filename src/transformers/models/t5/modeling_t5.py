@@ -988,8 +988,6 @@ class T5Stack(T5PreTrainedModel):
 
         hidden_states = self.dropout(inputs_embeds)
 
-        dec_time_1 = time.time()
-
         for i, (layer_module, past_key_value) in enumerate(zip(self.block, past_key_values)):
             layer_head_mask = head_mask[i]
             cross_attn_layer_head_mask = cross_attn_head_mask[i]
@@ -1084,8 +1082,6 @@ class T5Stack(T5PreTrainedModel):
 
         hidden_states = self.final_layer_norm(hidden_states)
         hidden_states = self.dropout(hidden_states)
-
-        dec_time_2 = time.time()
 
         # Add last layer
         if output_hidden_states:
@@ -1407,7 +1403,6 @@ class T5Model(T5PreTrainedModel):
 
         # Encode if needed (training, first prediction pass)
 
-        enc_time_1 = time.time()
         if encoder_outputs is None:
             encoder_outputs = self.encoder(
                 input_ids=input_ids,
@@ -1424,7 +1419,6 @@ class T5Model(T5PreTrainedModel):
                 hidden_states=encoder_outputs[1] if len(encoder_outputs) > 1 else None,
                 attentions=encoder_outputs[2] if len(encoder_outputs) > 2 else None,
             )
-        enc_time_2 = time.time()
 
         hidden_states = encoder_outputs[0]
 
@@ -1440,7 +1434,6 @@ class T5Model(T5PreTrainedModel):
                 decoder_attention_mask = decoder_attention_mask.to(self.decoder.first_device)
 
         # Decode
-        dec_time_1 = time.time()
         decoder_outputs = self.decoder(
             input_ids=decoder_input_ids,
             attention_mask=decoder_attention_mask,
@@ -1455,7 +1448,6 @@ class T5Model(T5PreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-        dec_time_2 = time.time()
 
         if not return_dict:
             return decoder_outputs + encoder_outputs
@@ -1687,6 +1679,7 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
             sequence_output = sequence_output * (self.model_dim**-0.5)
 
         logit_time_1 = time.time()
+        print('sequence_output: ', sequence_output)
         lm_logits = self.lm_head(sequence_output)
         logit_time_2 = time.time()
         print('logittime: ', logit_time_2-logit_time_1)
