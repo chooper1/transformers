@@ -1679,7 +1679,7 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
             sequence_output = sequence_output * (self.model_dim**-0.5)
 
         logit_time_1 = time.time()
-        print('sequence_output: ', sequence_output)
+        print('sequence_output: ', sequence_output.shape)
         lm_logits = self.lm_head(sequence_output)
         logit_time_2 = time.time()
         print('logittime: ', logit_time_2-logit_time_1)
