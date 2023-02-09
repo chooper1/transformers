@@ -1,6 +1,6 @@
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=''
 python run_translation.py \
-    --model_name_or_path t5-small \
+    --model_name_or_path google/mt5-small \
     --do_eval \
     --source_lang en \
     --target_lang de \
