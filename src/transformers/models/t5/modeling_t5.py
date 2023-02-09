@@ -1667,6 +1667,9 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
 
         logit_time_1 = time.time()
 
+        if past_key_values is not None:
+            print(past_key_values.shape)
+
         sequence_output = decoder_outputs[0]
 
         # Set device for model parallelism
