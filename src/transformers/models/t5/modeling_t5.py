@@ -332,7 +332,7 @@ class T5LayerFF(nn.Module):
 
 
 class T5Attention(nn.Module):
-    def __init__(self, config: T5Config, has_relative_attention_bias=False, is_cross_attn=True):
+    def __init__(self, config: T5Config, has_relative_attention_bias=False, is_cross_attn=True, layer_idx=0):
         super().__init__()
         self.is_decoder = config.is_decoder
         self.has_relative_attention_bias = has_relative_attention_bias
@@ -348,6 +348,7 @@ class T5Attention(nn.Module):
         self.is_cross_attn = is_cross_attn
         self.local_store = None
         self.local_idx = 0
+        self.layer_idx = layer_idx
 
         # Mesh TensorFlow initialization to avoid scaling before softmax
         self.q = nn.Linear(self.d_model, self.inner_dim, bias=False)
@@ -518,10 +519,10 @@ class T5Attention(nn.Module):
 
         is_dec_self_attn = self.is_decoder and not self.is_cross_attn
 
-        if is_dec_self_attn and self.local_store is not None and key_value_states is None:
+        if is_dec_self_attn and self.local_store is not None and past_key_value is None:
             #write local store
-            torch.save(key_states, 'tmpdir/key_states_'+str(self.local_idx)+'.pt')
-            torch.save(value_states, 'tmpdir/value_states_'+str(self.local_idx)+'.pt')
+            torch.save(key_states, 'tmpdir/key_states_layer_'+str(self.layer_idx)+'_'+str(self.local_idx)+'.pt')
+            torch.save(value_states, 'tmpdir/value_states_layer_'+str(self.layer_idx)+'_'+str(self.local_idx)+'.pt')
             self.local_idx += 1
         if is_dec_self_attn:
             self.local_store = (key_states,value_states)
@@ -582,9 +583,9 @@ class T5Attention(nn.Module):
 
 
 class T5LayerSelfAttention(nn.Module):
-    def __init__(self, config, has_relative_attention_bias=False):
+    def __init__(self, config, has_relative_attention_bias=False, layer_idx=0):
         super().__init__()
-        self.SelfAttention = T5Attention(config, has_relative_attention_bias=has_relative_attention_bias, is_cross_attn=False)
+        self.SelfAttention = T5Attention(config, has_relative_attention_bias=has_relative_attention_bias, is_cross_attn=False, layer_idx=layer_idx)
         self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
 
@@ -650,11 +651,11 @@ class T5LayerCrossAttention(nn.Module):
 
 
 class T5Block(nn.Module):
-    def __init__(self, config, has_relative_attention_bias=False):
+    def __init__(self, config, has_relative_attention_bias=False, layer_idx=0):
         super().__init__()
         self.is_decoder = config.is_decoder
         self.layer = nn.ModuleList()
-        self.layer.append(T5LayerSelfAttention(config, has_relative_attention_bias=has_relative_attention_bias))
+        self.layer.append(T5LayerSelfAttention(config, has_relative_attention_bias=has_relative_attention_bias, layer_idx=layer_idx))
         if self.is_decoder:
             self.layer.append(T5LayerCrossAttention(config))
 
@@ -868,7 +869,7 @@ class T5Stack(T5PreTrainedModel):
         self.is_decoder = config.is_decoder
 
         self.block = nn.ModuleList(
-            [T5Block(config, has_relative_attention_bias=bool(i == 0)) for i in range(config.num_layers)]
+            [T5Block(config, has_relative_attention_bias=bool(i == 0), layer_idx=i) for i in range(config.num_layers)]
         )
         self.final_layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
