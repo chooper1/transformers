@@ -347,6 +347,7 @@ class T5Attention(nn.Module):
         #for storing k,v
         self.is_cross_attn = is_cross_attn
         self.local_store = None
+        self.local_idx = 0
 
         # Mesh TensorFlow initialization to avoid scaling before softmax
         self.q = nn.Linear(self.d_model, self.inner_dim, bias=False)
@@ -511,14 +512,19 @@ class T5Attention(nn.Module):
         )
 
         #[BS,NUMHEADS,SEQLEN,HEADDIM]
-        if self.is_decoder and not self.is_cross_attn:
-            print(key_states.shape)
-            print(value_states.shape)
+        # if self.is_decoder and not self.is_cross_attn:
+            # print(key_states.shape)
+            # print(value_states.shape)
 
-        # if self.local_store is not None and :
-        #     #write
-        # else:
-        #     self.local_store = (key_states,value_states)
+        is_dec_self_attn = self.is_decoder and not self.is_cross_attn
+
+        if is_dec_self_attn and self.local_store is not None and key_value_states is None:
+            #write local store
+            torch.save(key_states, 'tmpdir/key_states_'+str(self.local_idx)+'.pt')
+            torch.save(value_states, 'tmpdir/value_states_'+str(self.local_idx)+'.pt')
+            self.local_idx += 1
+        if is_dec_self_attn:
+            self.local_store = (key_states,value_states)
 
 
 
