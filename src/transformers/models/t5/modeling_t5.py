@@ -506,8 +506,8 @@ class T5Attention(nn.Module):
             hidden_states, self.v, key_value_states, past_key_value[1] if past_key_value is not None else None
         )
 
-        # print(key_states.shape)
-        # print(value_states.shape)
+        print(key_states.shape)
+        print(value_states.shape)
 
         # compute scores
         scores = torch.matmul(
