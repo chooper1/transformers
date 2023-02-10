@@ -1663,12 +1663,12 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
             return_dict=return_dict,
         )
         dec_time_2 = time.time()
-        print('dectime: ', dec_time_2-dec_time_1)
+        #print('dectime: ', dec_time_2-dec_time_1)
 
         logit_time_1 = time.time()
 
-        if past_key_values is not None:
-            print(past_key_values.shape)
+        #if past_key_values is not None:
+        #    print(past_key_values.shape)
 
         sequence_output = decoder_outputs[0]
 
@@ -1683,13 +1683,13 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
             # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
             sequence_output = sequence_output * (self.model_dim**-0.5)
 
-        print('sequence_output: ', sequence_output.shape)
+        #print('sequence_output: ', sequence_output.shape)
         lm_logits = self.lm_head(sequence_output)
         logit_time_2 = time.time()
-        print('logittime: ', logit_time_2-logit_time_1)
+        #print('logittime: ', logit_time_2-logit_time_1)
 
-        print('self.config.d_model: ', self.config.d_model)
-        print('self.config.vocab_size: ', self.config.vocab_size)
+        #print('self.config.d_model: ', self.config.d_model)
+        #print('self.config.vocab_size: ', self.config.vocab_size)
 
         loss = None
         if labels is not None:
