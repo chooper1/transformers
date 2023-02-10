@@ -332,7 +332,7 @@ class T5LayerFF(nn.Module):
 
 
 class T5Attention(nn.Module):
-    def __init__(self, config: T5Config, has_relative_attention_bias=False):
+    def __init__(self, config: T5Config, has_relative_attention_bias=False, is_cross_attn=True):
         super().__init__()
         self.is_decoder = config.is_decoder
         self.has_relative_attention_bias = has_relative_attention_bias
@@ -343,6 +343,10 @@ class T5Attention(nn.Module):
         self.n_heads = config.num_heads
         self.dropout = config.dropout_rate
         self.inner_dim = self.n_heads * self.key_value_proj_dim
+
+        #for storing k,v
+        self.is_cross_attn = is_cross_attn
+        self.local_store = None
 
         # Mesh TensorFlow initialization to avoid scaling before softmax
         self.q = nn.Linear(self.d_model, self.inner_dim, bias=False)
@@ -506,8 +510,17 @@ class T5Attention(nn.Module):
             hidden_states, self.v, key_value_states, past_key_value[1] if past_key_value is not None else None
         )
 
-        print(key_states.shape)
-        print(value_states.shape)
+        #[BS,NUMHEADS,SEQLEN,HEADDIM]
+        if self.is_decoder and not self.is_cross_attn:
+            print(key_states.shape)
+            print(value_states.shape)
+
+        # if self.local_store is not None and :
+        #     #write
+        # else:
+        #     self.local_store = (key_states,value_states)
+
+
 
         # compute scores
         scores = torch.matmul(
@@ -565,7 +578,7 @@ class T5Attention(nn.Module):
 class T5LayerSelfAttention(nn.Module):
     def __init__(self, config, has_relative_attention_bias=False):
         super().__init__()
-        self.SelfAttention = T5Attention(config, has_relative_attention_bias=has_relative_attention_bias)
+        self.SelfAttention = T5Attention(config, has_relative_attention_bias=has_relative_attention_bias, is_cross_attn=False)
         self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
 
