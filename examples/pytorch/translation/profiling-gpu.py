@@ -41,20 +41,24 @@ def main():
     #device = "cuda:6" if torch.cuda.is_available() else "cpu"
     # device = "cpu"
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    N = 10
+    N = 1
     model = model.to(device)
     sequence = torch.LongTensor([[1]]).to(device)
 
-    with torch.profiler.profile(
-    activities=[
-        torch.profiler.ProfilerActivity.CPU,
-        torch.profiler.ProfilerActivity.CUDA,
-    ]
-    ) as p:
-        for i in range(0,N):
-            # outputs = model.bert.encoder(sequence.to(device))
-            outputs = model.generate(input_ids=sequence, max_length=seqlen)
-    print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
+    # with torch.profiler.profile(
+    # activities=[
+    #     torch.profiler.ProfilerActivity.CPU,
+    #     torch.profiler.ProfilerActivity.CUDA,
+    # ]
+    # ) as p:
+    #     for i in range(0,N):
+    #         # outputs = model.bert.encoder(sequence.to(device))
+    #         outputs = model.generate(input_ids=sequence, max_length=seqlen, gpu_profile=True)
+    # print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
+
+    for i in range(0,N):
+        # outputs = model.bert.encoder(sequence.to(device))
+        outputs = model.generate(input_ids=sequence, max_length=seqlen, gpu_profile=True)
 
 if __name__ == "__main__":
     main()

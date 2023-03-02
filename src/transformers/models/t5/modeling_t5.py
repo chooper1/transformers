@@ -1504,6 +1504,7 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
 
         #profiling
         self.curr_iter = 0
+        self.gpu_profile = True
 
     @add_start_docstrings(PARALLELIZE_DOCSTRING)
     def parallelize(self, device_map=None):
@@ -1649,53 +1650,97 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
             if decoder_attention_mask is not None:
                 decoder_attention_mask = decoder_attention_mask.to(self.decoder.first_device)
 
-        # Decode
-        dec_time_1 = time.time()
-        decoder_outputs = self.decoder(
-            input_ids=decoder_input_ids,
-            attention_mask=decoder_attention_mask,
-            inputs_embeds=decoder_inputs_embeds,
-            past_key_values=past_key_values,
-            encoder_hidden_states=hidden_states,
-            encoder_attention_mask=attention_mask,
-            head_mask=decoder_head_mask,
-            cross_attn_head_mask=cross_attn_head_mask,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-        dec_time_2 = time.time()
+        if self.gpu_profile:
+            with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ]
+            ) as p:
+                # Decode
+                dec_time_1 = time.time()
+                decoder_outputs = self.decoder(
+                    input_ids=decoder_input_ids,
+                    attention_mask=decoder_attention_mask,
+                    inputs_embeds=decoder_inputs_embeds,
+                    past_key_values=past_key_values,
+                    encoder_hidden_states=hidden_states,
+                    encoder_attention_mask=attention_mask,
+                    head_mask=decoder_head_mask,
+                    cross_attn_head_mask=cross_attn_head_mask,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
 
-        logit_time_1 = time.time()
+                sequence_output = decoder_outputs[0]
 
-        sequence_output = decoder_outputs[0]
+                # Set device for model parallelism
+                if self.model_parallel:
+                    torch.cuda.set_device(self.encoder.first_device)
+                    self.lm_head = self.lm_head.to(self.encoder.first_device)
+                    sequence_output = sequence_output.to(self.lm_head.weight.device)
 
-        # Set device for model parallelism
-        if self.model_parallel:
-            torch.cuda.set_device(self.encoder.first_device)
-            self.lm_head = self.lm_head.to(self.encoder.first_device)
-            sequence_output = sequence_output.to(self.lm_head.weight.device)
+                if self.config.tie_word_embeddings:
+                    # Rescale output before projecting on vocab
+                    # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
+                    sequence_output = sequence_output * (self.model_dim**-0.5)
 
-        if self.config.tie_word_embeddings:
-            # Rescale output before projecting on vocab
-            # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
-            sequence_output = sequence_output * (self.model_dim**-0.5)
+                lm_logits = self.lm_head(sequence_output)
 
-        lm_logits = self.lm_head(sequence_output)
-        logit_time_2 = time.time()
+            print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
 
-        if self.curr_iter == 128:
-            print('dectime: ', dec_time_2-dec_time_1)
-            print('sequence_output: ', sequence_output.shape)
-            print('logittime: ', logit_time_2-logit_time_1)
-
-            print('self.config.d_model: ', self.config.d_model)
-            print('self.config.vocab_size: ', self.config.vocab_size)
-        elif (encoder_outputs is None):
-            self.curr_iter = 0
         else:
-            self.curr_iter += 1
+
+            # Decode
+            dec_time_1 = time.time()
+            decoder_outputs = self.decoder(
+                input_ids=decoder_input_ids,
+                attention_mask=decoder_attention_mask,
+                inputs_embeds=decoder_inputs_embeds,
+                past_key_values=past_key_values,
+                encoder_hidden_states=hidden_states,
+                encoder_attention_mask=attention_mask,
+                head_mask=decoder_head_mask,
+                cross_attn_head_mask=cross_attn_head_mask,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
+            dec_time_2 = time.time()
+
+            logit_time_1 = time.time()
+
+            sequence_output = decoder_outputs[0]
+
+            # Set device for model parallelism
+            if self.model_parallel:
+                torch.cuda.set_device(self.encoder.first_device)
+                self.lm_head = self.lm_head.to(self.encoder.first_device)
+                sequence_output = sequence_output.to(self.lm_head.weight.device)
+
+            if self.config.tie_word_embeddings:
+                # Rescale output before projecting on vocab
+                # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
+                sequence_output = sequence_output * (self.model_dim**-0.5)
+
+            lm_logits = self.lm_head(sequence_output)
+            logit_time_2 = time.time()
+
+            if self.curr_iter == 128:
+                print('dectime: ', dec_time_2-dec_time_1)
+                print('sequence_output: ', sequence_output.shape)
+                print('logittime: ', logit_time_2-logit_time_1)
+
+                print('self.config.d_model: ', self.config.d_model)
+                print('self.config.vocab_size: ', self.config.vocab_size)
+                self.curr_iter += 1
+            elif (encoder_outputs is None):
+                self.curr_iter = 0
+            else:
+                self.curr_iter += 1
 
         loss = None
         if labels is not None:
