@@ -37,11 +37,11 @@ def main():
     # load model
     model = AutoModelForSeq2SeqLM.from_pretrained("t5-small", ignore_mismatched_sizes=True)
 
-    seqlen = 1024 + 1 # 128, 256, 512, 1024, 2048, 4096
+    seqlen = 256 + 1 # 128, 256, 512, 1024, 2048, 4096
     #device = "cuda:6" if torch.cuda.is_available() else "cpu"
     # device = "cpu"
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    N = 1024
+    N = 10
     model = model.to(device)
     sequence = torch.LongTensor([[1]]).to(device)
 
