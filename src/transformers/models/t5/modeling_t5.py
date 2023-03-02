@@ -20,6 +20,7 @@ import math
 import os
 import warnings
 from typing import Optional, Tuple, Union
+import time
 
 import torch
 from torch import nn
@@ -332,7 +333,7 @@ class T5LayerFF(nn.Module):
 
 
 class T5Attention(nn.Module):
-    def __init__(self, config: T5Config, has_relative_attention_bias=False, is_cross_attn=True, layer_idx=0):
+    def __init__(self, config: T5Config, has_relative_attention_bias=False):
         super().__init__()
         self.is_decoder = config.is_decoder
         self.has_relative_attention_bias = has_relative_attention_bias
@@ -343,12 +344,6 @@ class T5Attention(nn.Module):
         self.n_heads = config.num_heads
         self.dropout = config.dropout_rate
         self.inner_dim = self.n_heads * self.key_value_proj_dim
-
-        #for storing k,v
-        self.is_cross_attn = is_cross_attn
-        self.local_store = None
-        self.local_idx = 0
-        self.layer_idx = layer_idx
 
         # Mesh TensorFlow initialization to avoid scaling before softmax
         self.q = nn.Linear(self.d_model, self.inner_dim, bias=False)
@@ -512,22 +507,8 @@ class T5Attention(nn.Module):
             hidden_states, self.v, key_value_states, past_key_value[1] if past_key_value is not None else None
         )
 
-        #[BS,NUMHEADS,SEQLEN,HEADDIM]
-        # if self.is_decoder and not self.is_cross_attn:
-            # print(key_states.shape)
-            # print(value_states.shape)
-
-        is_dec_self_attn = self.is_decoder and not self.is_cross_attn
-
-        if is_dec_self_attn and self.local_store is not None and past_key_value is None:
-            #write local store
-            torch.save(key_states, 'tmpdir/key_states_layer_'+str(self.layer_idx)+'_'+str(self.local_idx)+'.pt')
-            torch.save(value_states, 'tmpdir/value_states_layer_'+str(self.layer_idx)+'_'+str(self.local_idx)+'.pt')
-            self.local_idx += 1
-        if is_dec_self_attn:
-            self.local_store = (key_states,value_states)
-
-
+        print(key_states.shape)
+        print(value_states.shape)
 
         # compute scores
         scores = torch.matmul(
@@ -583,9 +564,9 @@ class T5Attention(nn.Module):
 
 
 class T5LayerSelfAttention(nn.Module):
-    def __init__(self, config, has_relative_attention_bias=False, layer_idx=0):
+    def __init__(self, config, has_relative_attention_bias=False):
         super().__init__()
-        self.SelfAttention = T5Attention(config, has_relative_attention_bias=has_relative_attention_bias, is_cross_attn=False, layer_idx=layer_idx)
+        self.SelfAttention = T5Attention(config, has_relative_attention_bias=has_relative_attention_bias)
         self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
 
@@ -651,11 +632,11 @@ class T5LayerCrossAttention(nn.Module):
 
 
 class T5Block(nn.Module):
-    def __init__(self, config, has_relative_attention_bias=False, layer_idx=0):
+    def __init__(self, config, has_relative_attention_bias=False):
         super().__init__()
         self.is_decoder = config.is_decoder
         self.layer = nn.ModuleList()
-        self.layer.append(T5LayerSelfAttention(config, has_relative_attention_bias=has_relative_attention_bias, layer_idx=layer_idx))
+        self.layer.append(T5LayerSelfAttention(config, has_relative_attention_bias=has_relative_attention_bias))
         if self.is_decoder:
             self.layer.append(T5LayerCrossAttention(config))
 
@@ -869,7 +850,7 @@ class T5Stack(T5PreTrainedModel):
         self.is_decoder = config.is_decoder
 
         self.block = nn.ModuleList(
-            [T5Block(config, has_relative_attention_bias=bool(i == 0), layer_idx=i) for i in range(config.num_layers)]
+            [T5Block(config, has_relative_attention_bias=bool(i == 0)) for i in range(config.num_layers)]
         )
         self.final_layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
@@ -1525,6 +1506,9 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
         self.model_parallel = False
         self.device_map = None
 
+        #profiling
+        self.curr_iter = 0
+
     @add_start_docstrings(PARALLELIZE_DOCSTRING)
     def parallelize(self, device_map=None):
         self.device_map = (
@@ -1686,12 +1670,11 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
             return_dict=return_dict,
         )
         dec_time_2 = time.time()
-        # print('dectime: ', dec_time_2-dec_time_1)
 
         logit_time_1 = time.time()
 
-        # if past_key_values is not None:
-        #     print(past_key_values.shape)
+        if past_key_values is not None:
+            print(past_key_values.shape)
 
         sequence_output = decoder_outputs[0]
 
@@ -1706,13 +1689,20 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
             # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
             sequence_output = sequence_output * (self.model_dim**-0.5)
 
-        # print('sequence_output: ', sequence_output.shape)
         lm_logits = self.lm_head(sequence_output)
         logit_time_2 = time.time()
-        # print('logittime: ', logit_time_2-logit_time_1)
 
-        # print('self.config.d_model: ', self.config.d_model)
-        # print('self.config.vocab_size: ', self.config.vocab_size)
+        if self.curr_iter == 128:
+            print('dectime: ', dec_time_2-dec_time_1)
+            print('sequence_output: ', sequence_output.shape)
+            print('logittime: ', logit_time_2-logit_time_1)
+
+            print('self.config.d_model: ', self.config.d_model)
+            print('self.config.vocab_size: ', self.config.vocab_size)
+        elif (encoder_outputs is None):
+            self.curr_iter = 0
+        else:
+            self.curr_iter += 1
 
         loss = None
         if labels is not None:
