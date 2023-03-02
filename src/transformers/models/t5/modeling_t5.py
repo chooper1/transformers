@@ -1502,6 +1502,9 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
         self.model_parallel = False
         self.device_map = None
 
+        #profiling
+        self.curr_iter = 0
+
     @add_start_docstrings(PARALLELIZE_DOCSTRING)
     def parallelize(self, device_map=None):
         self.device_map = (
@@ -1663,7 +1666,6 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
             return_dict=return_dict,
         )
         dec_time_2 = time.time()
-        print('dectime: ', dec_time_2-dec_time_1)
 
         logit_time_1 = time.time()
 
@@ -1680,13 +1682,20 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
             # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
             sequence_output = sequence_output * (self.model_dim**-0.5)
 
-        print('sequence_output: ', sequence_output.shape)
         lm_logits = self.lm_head(sequence_output)
         logit_time_2 = time.time()
-        print('logittime: ', logit_time_2-logit_time_1)
 
-        print('self.config.d_model: ', self.config.d_model)
-        print('self.config.vocab_size: ', self.config.vocab_size)
+        if self.curr_iter == 128:
+            print('dectime: ', dec_time_2-dec_time_1)
+            print('sequence_output: ', sequence_output.shape)
+            print('logittime: ', logit_time_2-logit_time_1)
+
+            print('self.config.d_model: ', self.config.d_model)
+            print('self.config.vocab_size: ', self.config.vocab_size)
+        elif (encoder_outputs is None):
+            self.curr_iter = 0
+        else:
+            self.curr_iter += 1
 
         loss = None
         if labels is not None:
