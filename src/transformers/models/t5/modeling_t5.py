@@ -1674,8 +1674,8 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
                 )
 
             if self.curr_iter == 0:
+                print('DECODER:')
                 print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
-                self.curr_iter = 1
 
             sequence_output = decoder_outputs[0]
 
@@ -1699,6 +1699,7 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
                 lm_logits = self.lm_head(sequence_output)
 
             if self.curr_iter == 0:
+                print('VOCAB:')
                 print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
                 self.curr_iter = 1
 
