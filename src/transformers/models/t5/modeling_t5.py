@@ -1658,7 +1658,6 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
             ]
             ) as p:
                 # Decode
-                dec_time_1 = time.time()
                 decoder_outputs = self.decoder(
                     input_ids=decoder_input_ids,
                     attention_mask=decoder_attention_mask,
@@ -1674,22 +1673,34 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
                     return_dict=return_dict,
                 )
 
-                sequence_output = decoder_outputs[0]
+            if self.curr_iter == 0:
+                print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
+                self.curr_iter = 1
 
-                # Set device for model parallelism
-                if self.model_parallel:
-                    torch.cuda.set_device(self.encoder.first_device)
-                    self.lm_head = self.lm_head.to(self.encoder.first_device)
-                    sequence_output = sequence_output.to(self.lm_head.weight.device)
+            sequence_output = decoder_outputs[0]
 
-                if self.config.tie_word_embeddings:
-                    # Rescale output before projecting on vocab
-                    # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
-                    sequence_output = sequence_output * (self.model_dim**-0.5)
+            # Set device for model parallelism
+            if self.model_parallel:
+                torch.cuda.set_device(self.encoder.first_device)
+                self.lm_head = self.lm_head.to(self.encoder.first_device)
+                sequence_output = sequence_output.to(self.lm_head.weight.device)
 
+            if self.config.tie_word_embeddings:
+                # Rescale output before projecting on vocab
+                # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
+                sequence_output = sequence_output * (self.model_dim**-0.5)
+
+            with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ]
+            ) as p:
                 lm_logits = self.lm_head(sequence_output)
 
-            print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
+            if self.curr_iter == 0:
+                print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
+                self.curr_iter = 1
 
         else:
 
