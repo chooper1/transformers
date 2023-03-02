@@ -58,7 +58,7 @@ def main():
 
     for i in range(0,N):
         # outputs = model.bert.encoder(sequence.to(device))
-        outputs = model.generate(input_ids=sequence, max_length=seqlen, gpu_profile=True)
+        outputs = model.generate(input_ids=sequence, max_length=seqlen)
 
 if __name__ == "__main__":
     main()
