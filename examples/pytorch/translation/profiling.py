@@ -30,15 +30,18 @@ from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
+import torch
+from torch.profiler import profile, record_function, ProfilerActivity
+
 def main():
     # load model
-    model = Seq2SeqTrainer.from_pretrained("mt5-small", ignore_mismatched_sizes=True)
+    model = AutoModelForSeq2SeqLM.from_pretrained("t5-small", ignore_mismatched_sizes=True)
 
-    seqlen = 128 + 1 # 128, 256, 512, 1024, 2048, 4096
+    seqlen = 1024 + 1 # 128, 256, 512, 1024, 2048, 4096
     sequence = torch.LongTensor([[1]])
     #device = "cuda:6" if torch.cuda.is_available() else "cpu"
     device = "cpu"
-    N = 10
+    N = 1024
     model = model.to(device)
     for i in range(0,N):
 #    	outputs = model.transformer(sequence.to(device))
